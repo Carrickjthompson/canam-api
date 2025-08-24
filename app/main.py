@@ -1,12 +1,20 @@
-# main.py — Can-Am Specialist API (API-only, no GPT)
+# main.py — Can-Am Specialist API (feature endpoints + GPT /chat)
 
 from typing import List, Optional, Dict, Any
+import os
 import re
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="Can-Am Specialist API", version="2.1.0")
+# OPTIONAL: only needed for /chat parity with your GPT
+try:
+    from openai import OpenAI  # pip install openai
+    _OPENAI_AVAILABLE = True
+except Exception:
+    _OPENAI_AVAILABLE = False
+
+app = FastAPI(title="Can-Am Specialist API", version="2.2.0")
 
 # CORS
 app.add_middleware(
@@ -248,7 +256,7 @@ class DealerIdReq(BaseModel):
 
 @app.post("/dealer_details", response_model=DealerFull)
 def dealer_details(_: DealerIdReq):
-    base = nearest_dealers(NearestDealersReq(zip="33139")).pop().model_dump()
+    base = nearest_dealers(NearestDealersReq(zip="33139"))[0].model_dump()
     return DealerFull(**base, hours_url="https://example.com/hours",
                       manager="T. Rider", email="mgr@example.com", notes="Demo rides daily")
 
@@ -436,114 +444,47 @@ def bundle_accessories(req: BundleReq):
     bundles = [bundle] if (req.budget_usd is None or bundle.total_msrp_usd <= req.budget_usd) else []
     return AccessoryBundles(use_case=req.use_case, bundles=bundles)
 
-# ========= Deterministic Router (/answer) =========
-class QIn(BaseModel):
-    question: str
-
-class QOut(BaseModel):
-    answer: str
-
-def _pick_year(text: str, default: int = 2024) -> int:
-    m = re.search(r"\b(20\d{2})\b", text)
-    return int(m.group(1)) if m else default
-
-def _pick_model(text: str) -> Optional[str]:
-    t = text.lower()
-    if "spyder f3" in t or re.search(r"\bf3\b", t): return "Spyder F3 T"
-    if "spyder rt" in t or re.search(r"\brt\b", t): return "Spyder RT"
-    if "ryker" in t: return "Ryker"
-    if "canyon" in t: return "Canyon"
-    return None
-
-@app.post("/answer", response_model=QOut)
-def answer(q: QIn):
-    text = q.question.strip()
-    if not text:
-        raise HTTPException(400, "Empty question")
-    lo = text.lower()
-    model = _pick_model(lo)
-    year = _pick_year(lo)
-
-    # Specs
-    if any(k in lo for k in ("spec", "specs", "specifications", "spec sheet")) and model:
-        spec = spec_sheet(SpecReq(model=model, year=year))
-        msg = (f"{spec.model} {spec.year} {spec.trim or ''}\n"
-               f"Engine: {spec.engine}  Transmission: {spec.transmission}\n"
-               f"Horsepower: {spec.horsepower} hp  Torque: {spec.torque} lb-ft\n"
-               f"Weight: {spec.weight_lbs} lb  Seat height: {spec.seat_height_in} in\n"
-               f"Electronics: {spec.electronics or '—'}")
-        return QOut(answer=msg)
-
-    # Oil / Fluids / Torque
-    if any(k in lo for k in ("oil", "fluid", "fluids", "torque", "capacity")) and model:
-        sys = "engine"
-        if "brake" in lo: sys = "brake"
-        elif "trans" in lo or "transmission" in lo: sys = "trans"
-        ft = fluids_torque(FluidsReq(model=model, year=year, system=sys))
-        caps = ", ".join(f"{k.replace('_',' ')}: {v}" for k, v in ft.capacities.items()) or "—"
-        torq = "; ".join(f"{t['fastener']}: {t['value_nm']} Nm" for t in ft.torques) or "—"
-        spec = f"Viscosity: {ft.specs.get('viscosity','—')}  Type: {ft.specs.get('type','—')}"
-        return QOut(answer=f"{model} {year} {sys} fluids\n{caps}\n{spec}\nKey torques: {torq}")
-
-    # Tires
-    if "tire" in lo and model:
-        axle = "rear" if "rear" in lo else "front"
-        ts = tire_fitment(TireReq(model=model, year=year, axle=axle))
-        return QOut(answer=f"{model} {year} {axle} tire: {ts.size}, {ts.pressure_psi} psi. Recommended brand: {ts.brand}.")
-
-    # Maintenance
-    if any(k in lo for k in ("service", "maint", "maintenance", "interval")) and model:
-        miles = None
-        m = re.search(r"(\d{3,6})\s*(mi|miles)", lo)
-        if m: miles = int(m.group(1))
-        sched = get_maintenance_schedule(MaintenanceReq(model=model, year=year, miles=miles))
-        items = sched.get("next_due", [])
-        lines = [f"- {i.get('task','—')} — {i.get('interval_mi','—')} mi / {i.get('interval_time','—')}" for i in items]
-        return QOut(answer=f"{model} {year} maintenance:\n" + ("\n".join(lines) if lines else "No items."))
-
-    # Dealers
-    if "dealer" in lo or "dealership" in lo:
-        zm = re.search(r"\b\d{5}\b", lo)
-        if not zm:
-            return QOut(answer="Say a 5-digit ZIP, e.g., “dealer near 90210”.")
-        lst = nearest_dealers(NearestDealersReq(zip=zm.group(0), radius_mi=50, limit=5))
-        if not lst: return QOut(answer="No nearby dealers found.")
-        txt = "Closest dealers:\n" + "\n".join(f"• {d.name} — {d.city}, {d.state}" for d in lst[:5])
-        return QOut(answer=txt)
-
-    # Parts
-    if any(k in lo for k in ("part", "parts", "diagram")) and model:
-        asm = "front_brake" if "brake" in lo else ("rear_drive" if "drive" in lo else "handlebar")
-        items = parts_lookup(PartsReq(model=model, year=year, assembly=asm))
-        if not items: return QOut(answer="No parts found.")
-        first = items[0]
-        return QOut(answer=f"{model} {year} parts ({asm}): {first.name} — #{first.part_no}")
-
-    # Accessories / Bundles
-    if "accessor" in lo or "bundle" in lo:
-        use = ("touring" if "tour" in lo else
-               "commuter" if "commute" in lo else
-               "performance" if "performance" in lo else
-               "two-up" if "two" in lo else
-               "winter" if "winter" in lo else
-               "touring")
-        b = bundle_accessories(BundleReq(model=model or "Ryker", year=year, use_case=use))
-        if not b.bundles:
-            return QOut(answer="No bundle within budget. Ask for another use-case.")
-        bb = b.bundles[0]
-        items = ", ".join(i.name for i in bb.items)
-        return QOut(answer=f"{bb.bundle_name} (${bb.total_msrp_usd}): {items}")
-
-    # Default → recommendation
-    rp = RecommendationInput.RiderProfile(
-        experience_level=("new" if "new" in lo else "expert" if "expert" in lo else "intermediate"),
-        ride_type=("long-distance" if any(k in lo for k in ("tour", "two-up", "highway", "distance"))
-                   else "urban" if any(k in lo for k in ("city", "commute"))
-                   else "solo"),
-        comfort_priority=any(k in lo for k in ("tour", "two-up", "comfort"))
+# ========= GPT /chat (parity path) =========
+# This endpoint is what your website should call to mirror your GPT answers.
+if _OPENAI_AVAILABLE:
+    OPENAI_MODEL = "gpt-4o-mini"
+    OPENAI_SYS = (
+        "You are CAN-AM Product Expert for on-road (Ryker, Spyder F3, Spyder RT, Canyon). "
+        "Always feature official Can-Am/BRP products first. Do NOT recommend aftermarket; "
+        "if asked, warn about warranty/safety and redirect to official options. "
+        "Tires: Kenda XPS only. Use model/year-accurate facts with concrete numbers. "
+        "If unconfirmed, say: 'This information is not confirmed. Consult the owner’s manual or a certified technician.'"
     )
-    rec = recommend_model(RecommendationInput(rider_profile=rp))
-    msg = f"I recommend the {rec.model} {rec.trim or ''} {rec.year or ''}.".strip()
-    if rec.reasons:
-        msg += f" Reasons: {', '.join(rec.reasons)}."
-    return QOut(answer=msg)
+    class ChatIn(BaseModel):
+        question: str
+    class ChatOut(BaseModel):
+        answer: str
+    _client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+    @app.post("/chat", response_model=ChatOut)
+    def chat(req: ChatIn):
+        if not req.question.strip():
+            return ChatOut(answer="Please ask a question.")
+        if not _client.api_key:
+            raise HTTPException(500, "Missing OPENAI_API_KEY.")
+        try:
+            resp = _client.chat.completions.create(
+                model=OPENAI_MODEL,
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": OPENAI_SYS},
+                    {"role": "user", "content": req.question.strip()},
+                ],
+            )
+            return ChatOut(answer=resp.choices[0].message.content.strip())
+        except Exception as e:
+            raise HTTPException(500, f"Error contacting GPT: {e}")
+else:
+    # If openai is not installed, keep the route but return a clear error.
+    class ChatIn(BaseModel):
+        question: str
+    class ChatOut(BaseModel):
+        answer: str
+    @app.post("/chat", response_model=ChatOut)
+    def chat_unavailable(_: ChatIn):
+        raise HTTPException(500, "OpenAI client not available on server.")
