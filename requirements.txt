@@ -1,4 +1,5 @@
 fastapi
 uvicorn
 pydantic
-openai>=1.40.0
+openai
+typing-extensions
