@@ -1,7 +1,7 @@
+from typing import List, Optional, Dict, Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
 
 app = FastAPI(title="Can-Am Specialist API", version="1.2.0")
 
@@ -12,12 +12,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ====== Shared Schemas ======
+# ========= Shared Schemas =========
 
 class ModelRef(BaseModel):
-    model: str  # Ryker | Spyder F3 | Spyder RT | Canyon
+    model: str                      # Ryker | Spyder F3 | Spyder RT | Canyon
     year: Optional[int] = None
-    trim: Optional[str] = None  # e.g., Rally, Sport, Limited, Sea-to-Sky
+    trim: Optional[str] = None      # e.g., Rally, Sport, Limited, Sea-to-Sky
 
 class FieldValue(BaseModel):
     model: str
@@ -35,12 +35,12 @@ class ComparisonRequest(BaseModel):
 
 class ComparisonResponse(BaseModel):
     table: List[ComparisonRow]
-    highlights: List[str] = []
+    highlights: List[str] = Field(default_factory=list)
 
 class RecommendationInput(BaseModel):
     class RiderProfile(BaseModel):
-        experience_level: str  # new|intermediate|expert
-        ride_type: str         # solo|two-up|long-distance|urban|adventure
+        experience_level: str                 # new|intermediate|expert
+        ride_type: str                        # solo|two-up|long-distance|urban|adventure
         comfort_priority: Optional[bool] = True
         budget_usd: Optional[int] = None
     rider_profile: RiderProfile
@@ -49,7 +49,7 @@ class RecommendationOutput(BaseModel):
     model: str
     year: Optional[int] = None
     trim: Optional[str] = None
-    reasons: List[str] = []
+    reasons: List[str] = Field(default_factory=list)
 
 class Dealer(BaseModel):
     dealer_id: str
@@ -60,7 +60,7 @@ class Dealer(BaseModel):
     zip: str
     phone: Optional[str] = None
     distance: Optional[float] = None
-    services: List[str] = []
+    services: List[str] = Field(default_factory=list)
     website: Optional[str] = None
     lat: Optional[float] = None
     lon: Optional[float] = None
@@ -72,7 +72,7 @@ class DealerFull(Dealer):
     notes: Optional[str] = None
 
 class DayHours(BaseModel):
-    day: str
+    day: str                                  # Mon..Sun
     open: Optional[str] = None
     close: Optional[str] = None
     closed: bool = False
@@ -89,7 +89,7 @@ class InventoryItem(BaseModel):
     color: Optional[str] = None
     vin: Optional[str] = None
     msrp_usd: Optional[float] = None
-    status: str  # in_stock|allocated|in_transit|sold
+    status: str                                # in_stock|allocated|in_transit|sold
     updated_at: str
 
 class InventoryResponse(BaseModel):
@@ -100,7 +100,7 @@ class MaintenanceItem(BaseModel):
     task: str
     interval_mi: Optional[int] = None
     interval_time: Optional[str] = None
-    parts: List[str] = []
+    parts: List[str] = Field(default_factory=list)
     notes: Optional[str] = None
 
 class RecallItem(BaseModel):
@@ -130,9 +130,9 @@ class PartItem(BaseModel):
     diagram_url: Optional[str] = None
 
 class FluidTorque(BaseModel):
-    capacities: Dict[str, str] = {}
-    specs: Dict[str, Optional[str]] = {}
-    torques: List[Dict[str, Any]] = []
+    capacities: Dict[str, str] = Field(default_factory=dict)
+    specs: Dict[str, Optional[str]] = Field(default_factory=dict)
+    torques: List[Dict[str, Any]] = Field(default_factory=list)
 
 class SpecSheet(BaseModel):
     model: str
@@ -150,7 +150,7 @@ class SpecSheet(BaseModel):
     electronics: Optional[str] = None
 
 class TireSpec(BaseModel):
-    axle: str  # front|rear
+    axle: str                   # front|rear
     size: str
     load_index: Optional[str] = None
     pressure_psi: float
@@ -160,7 +160,7 @@ class Waypoint(BaseModel):
     name: str
     lat: float
     lon: float
-    type: str  # start|dealer|scenic|fuel|end
+    type: str                  # start|dealer|scenic|fuel|end
 
 class RidePlan(BaseModel):
     distance_mi: float
@@ -185,13 +185,13 @@ class AccessoryBundles(BaseModel):
     use_case: str
     bundles: List[AccessoryBundle]
 
-# ====== Health ======
+# ========= Health =========
 
 @app.get("/")
 def root():
     return {"message": "Welcome to the Can-Am Specialist API"}
 
-# ====== Endpoints (stub logic, schema-accurate) ======
+# ========= Endpoints (stub logic matching schemas) =========
 
 # Compare models
 @app.post("/compare_models", response_model=ComparisonResponse)
@@ -214,12 +214,16 @@ def compare_models(req: ComparisonRequest):
 def recommend_model(req: RecommendationInput):
     rp = req.rider_profile
     if rp.ride_type in ["two-up", "long-distance"]:
-        return RecommendationOutput(model="Spyder RT", year=2024, trim="Limited",
-                                    reasons=["Two-up touring", "Largest storage", "Wind protection"])
-    return RecommendationOutput(model="Ryker", year=2024, trim="Sport",
-                                reasons=["Lightweight agility", "Accessible pricing"])
+        return RecommendationOutput(
+            model="Spyder RT", year=2024, trim="Limited",
+            reasons=["Two-up touring", "Largest storage", "Wind protection"]
+        )
+    return RecommendationOutput(
+        model="Ryker", year=2024, trim="Sport",
+        reasons=["Lightweight agility", "Accessible pricing"]
+    )
 
-# Accessory fitment (single SKU)
+# Accessory fitment (single)
 class AccessoryFitmentReq(BaseModel):
     model: str
     year: int
@@ -291,7 +295,7 @@ def inventory_lookup(_: InventoryReq):
 # Test ride scheduling
 class TestRideSlotsReq(BaseModel):
     dealer_id: str
-    date: str  # YYYY-MM-DD
+    date: str                       # YYYY-MM-DD
     model: Optional[str] = None
 
 @app.post("/test_ride_slots", response_model=List[Dict[str, str]])
@@ -353,7 +357,7 @@ def troubleshoot(_: TroubleshootReq):
 class PartsReq(BaseModel):
     model: str
     year: int
-    assembly: str  # front_brake | rear_drive | handlebar | ...
+    assembly: str                   # front_brake | rear_drive | handlebar | ...
 
 @app.post("/parts_lookup", response_model=List[PartItem])
 def parts_lookup(_: PartsReq):
@@ -395,7 +399,7 @@ def spec_sheet(req: SpecReq):
 class TireReq(BaseModel):
     model: str
     year: int
-    axle: str  # front|rear
+    axle: str                        # front|rear
 
 @app.post("/tire_fitment", response_model=TireSpec)
 def tire_fitment(req: TireReq):
@@ -426,7 +430,7 @@ def ride_planner(_: RidePlannerReq):
 class BundleReq(BaseModel):
     model: str
     year: int
-    use_case: str  # touring|commuter|performance|winter|two-up
+    use_case: str                    # touring|commuter|performance|winter|two-up
     budget_usd: Optional[int] = None
 
 @app.post("/bundle_accessories", response_model=AccessoryBundles)
@@ -439,6 +443,5 @@ def bundle_accessories(req: BundleReq):
             AccessoryItem(sku="219401111", name="Top Case", category="Luggage", msrp_usd=999, fits=True),
         ],
     )
-    # Respect budget if provided
     bundles = [bundle] if (req.budget_usd is None or bundle.total_msrp_usd <= req.budget_usd) else []
     return AccessoryBundles(use_case=req.use_case, bundles=bundles)
