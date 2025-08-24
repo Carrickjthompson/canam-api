@@ -1,26 +1,444 @@
 from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import List
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
 
-app = FastAPI(title="Can-Am API")
+app = FastAPI(title="Can-Am Specialist API", version="1.2.0")
 
-# Example model for accessory check
-class AccessoryCheckRequest(BaseModel):
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ====== Shared Schemas ======
+
+class ModelRef(BaseModel):
+    model: str  # Ryker | Spyder F3 | Spyder RT | Canyon
+    year: Optional[int] = None
+    trim: Optional[str] = None  # e.g., Rally, Sport, Limited, Sea-to-Sky
+
+class FieldValue(BaseModel):
+    model: str
+    year: Optional[int] = None
+    trim: Optional[str] = None
+    value: str
+
+class ComparisonRow(BaseModel):
+    label: str
+    values: List[FieldValue]
+
+class ComparisonRequest(BaseModel):
+    models: List[ModelRef]
+    fields: Optional[List[str]] = None
+
+class ComparisonResponse(BaseModel):
+    table: List[ComparisonRow]
+    highlights: List[str] = []
+
+class RecommendationInput(BaseModel):
+    class RiderProfile(BaseModel):
+        experience_level: str  # new|intermediate|expert
+        ride_type: str         # solo|two-up|long-distance|urban|adventure
+        comfort_priority: Optional[bool] = True
+        budget_usd: Optional[int] = None
+    rider_profile: RiderProfile
+
+class RecommendationOutput(BaseModel):
+    model: str
+    year: Optional[int] = None
+    trim: Optional[str] = None
+    reasons: List[str] = []
+
+class Dealer(BaseModel):
+    dealer_id: str
+    name: str
+    address: Optional[str] = None
+    city: str
+    state: str
+    zip: str
+    phone: Optional[str] = None
+    distance: Optional[float] = None
+    services: List[str] = []
+    website: Optional[str] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+
+class DealerFull(Dealer):
+    hours_url: Optional[str] = None
+    manager: Optional[str] = None
+    email: Optional[str] = None
+    notes: Optional[str] = None
+
+class DayHours(BaseModel):
+    day: str
+    open: Optional[str] = None
+    close: Optional[str] = None
+    closed: bool = False
+
+class HoursResponse(BaseModel):
+    timezone: str
+    hours: List[DayHours]
+
+class InventoryItem(BaseModel):
+    sku: str
+    model: str
+    year: Optional[int] = None
+    trim: Optional[str] = None
+    color: Optional[str] = None
+    vin: Optional[str] = None
+    msrp_usd: Optional[float] = None
+    status: str  # in_stock|allocated|in_transit|sold
+    updated_at: str
+
+class InventoryResponse(BaseModel):
+    items: List[InventoryItem]
+    last_updated: str
+
+class MaintenanceItem(BaseModel):
+    task: str
+    interval_mi: Optional[int] = None
+    interval_time: Optional[str] = None
+    parts: List[str] = []
+    notes: Optional[str] = None
+
+class RecallItem(BaseModel):
+    id: str
+    title: str
+    date: str
+    action: str
+
+class TroubleshootFix(BaseModel):
+    step: str
+    tools: Optional[str] = None
+    time_min: Optional[int] = None
+    safety: Optional[str] = None
+
+class TroubleshootCause(BaseModel):
+    cause: str
+    probability: Optional[float] = None
+
+class TroubleshootResult(BaseModel):
+    causes: List[TroubleshootCause]
+    fixes: List[TroubleshootFix]
+
+class PartItem(BaseModel):
+    part_no: str
+    name: str
+    qty: int
+    diagram_url: Optional[str] = None
+
+class FluidTorque(BaseModel):
+    capacities: Dict[str, str] = {}
+    specs: Dict[str, Optional[str]] = {}
+    torques: List[Dict[str, Any]] = []
+
+class SpecSheet(BaseModel):
     model: str
     year: int
-    accessories: List[str]
+    trim: Optional[str] = None
+    engine: Optional[str] = None
+    transmission: Optional[str] = None
+    horsepower: Optional[int] = None
+    torque: Optional[int] = None
+    weight_lbs: Optional[int] = None
+    seat_height_in: Optional[float] = None
+    dimensions: Optional[str] = None
+    suspension: Optional[str] = None
+    brakes: Optional[str] = None
+    electronics: Optional[str] = None
 
-class AccessoryCheckResponse(BaseModel):
-    compatible: List[str]
-    incompatible: List[str]
+class TireSpec(BaseModel):
+    axle: str  # front|rear
+    size: str
+    load_index: Optional[str] = None
+    pressure_psi: float
+    brand: str = "Kenda XPS"
+
+class Waypoint(BaseModel):
+    name: str
+    lat: float
+    lon: float
+    type: str  # start|dealer|scenic|fuel|end
+
+class RidePlan(BaseModel):
+    distance_mi: float
+    duration_min: float
+    polyline: str
+    waypoints: List[Waypoint]
+
+class AccessoryItem(BaseModel):
+    sku: str
+    name: str
+    category: str
+    msrp_usd: float
+    fits: bool
+    notes: Optional[str] = None
+
+class AccessoryBundle(BaseModel):
+    bundle_name: str
+    total_msrp_usd: float
+    items: List[AccessoryItem]
+
+class AccessoryBundles(BaseModel):
+    use_case: str
+    bundles: List[AccessoryBundle]
+
+# ====== Health ======
 
 @app.get("/")
-def read_root():
-    return {"message": "Welcome to the Can-Am API — your 3-wheel resource!"}
+def root():
+    return {"message": "Welcome to the Can-Am Specialist API"}
 
-@app.post("/check_accessory_compatibility", response_model=AccessoryCheckResponse)
-def check_accessories(request: AccessoryCheckRequest):
-    # Example dummy logic — later we’ll connect real data
-    compatible = [a for a in request.accessories if "Can-Am" in a]
-    incompatible = [a for a in request.accessories if "Can-Am" not in a]
-    return {"compatible": compatible, "incompatible": incompatible}
+# ====== Endpoints (stub logic, schema-accurate) ======
+
+# Compare models
+@app.post("/compare_models", response_model=ComparisonResponse)
+def compare_models(req: ComparisonRequest):
+    return ComparisonResponse(
+        table=[
+            ComparisonRow(
+                label="Engine",
+                values=[
+                    FieldValue(model=req.models[0].model, year=req.models[0].year, trim=req.models[0].trim, value="Rotax 900 ACE"),
+                    FieldValue(model=req.models[1].model, year=req.models[1].year, trim=req.models[1].trim, value="Rotax 1330 ACE"),
+                ],
+            )
+        ],
+        highlights=["RT favors touring comfort; Ryker is lighter"],
+    )
+
+# Recommend model
+@app.post("/recommend_model", response_model=RecommendationOutput)
+def recommend_model(req: RecommendationInput):
+    rp = req.rider_profile
+    if rp.ride_type in ["two-up", "long-distance"]:
+        return RecommendationOutput(model="Spyder RT", year=2024, trim="Limited",
+                                    reasons=["Two-up touring", "Largest storage", "Wind protection"])
+    return RecommendationOutput(model="Ryker", year=2024, trim="Sport",
+                                reasons=["Lightweight agility", "Accessible pricing"])
+
+# Accessory fitment (single SKU)
+class AccessoryFitmentReq(BaseModel):
+    model: str
+    year: int
+    accessory_sku: str
+
+@app.post("/check_accessory_compatibility")
+def accessory_fitment(req: AccessoryFitmentReq):
+    fits = req.accessory_sku.startswith("2194")
+    return {"fits": fits, "notes": "Direct fit" if fits else "Check adapter kit", "alternatives": ["219401111"] if not fits else []}
+
+# Dealers
+class NearestDealersReq(BaseModel):
+    zip: str
+    radius_mi: Optional[int] = 50
+    limit: Optional[int] = 10
+
+@app.post("/nearest_dealers", response_model=List[Dealer])
+def nearest_dealers(_: NearestDealersReq):
+    return [Dealer(
+        dealer_id="D123", name="Alpha Can-Am", address="100 Beach Rd",
+        city="Miami", state="FL", zip="33139", phone="305-555-0100",
+        distance=8.2, services=["sales", "service"], website="https://example.com",
+        lat=25.7907, lon=-80.13
+    )]
+
+class DealerIdReq(BaseModel):
+    dealer_id: str
+
+@app.post("/dealer_details", response_model=DealerFull)
+def dealer_details(_: DealerIdReq):
+    base = nearest_dealers(NearestDealersReq(zip="33139"))[0].model_dump()
+    return DealerFull(**base, hours_url="https://example.com/hours", manager="T. Rider", email="mgr@example.com", notes="Demo rides daily")
+
+@app.post("/dealer_hours", response_model=HoursResponse)
+def dealer_hours(_: DealerIdReq):
+    return HoursResponse(
+        timezone="America/New_York",
+        hours=[
+            DayHours(day="Mon", open="09:00", close="18:00"),
+            DayHours(day="Tue", open="09:00", close="18:00"),
+            DayHours(day="Wed", open="09:00", close="18:00"),
+            DayHours(day="Thu", open="09:00", close="18:00"),
+            DayHours(day="Fri", open="09:00", close="18:00"),
+            DayHours(day="Sat", open="10:00", close="16:00"),
+            DayHours(day="Sun", closed=True),
+        ],
+    )
+
+# Inventory
+class InventoryReq(BaseModel):
+    dealer_id: str
+    model: str
+    year: Optional[int] = None
+    trim: Optional[str] = None
+
+@app.post("/inventory_lookup", response_model=InventoryResponse)
+def inventory_lookup(_: InventoryReq):
+    return InventoryResponse(
+        items=[
+            InventoryItem(
+                sku="RYK-900-SPORT", model="Ryker", year=2024, trim="Sport",
+                color="Black", vin="RF3XXXXXXX123456", msrp_usd=12499,
+                status="in_stock", updated_at="2025-08-24T14:00:00Z"
+            )
+        ],
+        last_updated="2025-08-24T14:00:00Z",
+    )
+
+# Test ride scheduling
+class TestRideSlotsReq(BaseModel):
+    dealer_id: str
+    date: str  # YYYY-MM-DD
+    model: Optional[str] = None
+
+@app.post("/test_ride_slots", response_model=List[Dict[str, str]])
+def test_ride_slots(_: TestRideSlotsReq):
+    return [
+        {"slot_id": "S1", "start": "2025-08-25T14:00:00Z", "end": "2025-08-25T14:30:00Z"},
+        {"slot_id": "S2", "start": "2025-08-25T15:00:00Z", "end": "2025-08-25T15:30:00Z"},
+    ]
+
+class BookRideReq(BaseModel):
+    slot_id: str
+    name: str
+    phone: str
+    email: Optional[str] = None
+
+@app.post("/book_test_ride")
+def book_test_ride(_: BookRideReq):
+    return {
+        "status": "confirmed",
+        "confirmation_id": "CTR-001",
+        "dealer": {"dealer_id": "D123", "name": "Alpha Can-Am", "city": "Miami", "state": "FL", "zip": "33139"},
+    }
+
+# Maintenance
+class MaintenanceReq(BaseModel):
+    model: str
+    year: int
+    miles: Optional[int] = None
+
+@app.post("/get_maintenance_schedule")
+def get_maintenance_schedule(_: MaintenanceReq):
+    return {"next_due": [
+        {"task": "Engine oil & filter", "interval_mi": 6000, "interval_time": "12 months",
+         "parts": ["XPS 5W-40", "420956744"], "notes": "Warm engine before draining"}
+    ]}
+
+# Recalls
+class RecallReq(BaseModel):
+    vin: str
+
+@app.post("/recall_check")
+def recall_check(_: RecallReq):
+    return {"status": "none", "open_recalls": []}
+
+# Troubleshoot
+class TroubleshootReq(BaseModel):
+    model: str
+    year: int
+    symptom: str
+
+@app.post("/troubleshoot", response_model=TroubleshootResult)
+def troubleshoot(_: TroubleshootReq):
+    return TroubleshootResult(
+        causes=[TroubleshootCause(cause="Loose battery terminal", probability=0.4)],
+        fixes=[TroubleshootFix(step="Tighten terminals", tools="10mm wrench", time_min=10, safety="Disconnect negative first")],
+    )
+
+# Parts
+class PartsReq(BaseModel):
+    model: str
+    year: int
+    assembly: str  # front_brake | rear_drive | handlebar | ...
+
+@app.post("/parts_lookup", response_model=List[PartItem])
+def parts_lookup(_: PartsReq):
+    return [PartItem(part_no="705601234", name="Front brake pad set", qty=1, diagram_url="https://example.com/diag/brake-front")]
+
+# Fluids & torque
+class FluidsReq(BaseModel):
+    model: str
+    year: int
+    system: Optional[str] = Field(None, description="engine|trans|brake|chassis")
+
+@app.post("/fluids_torque", response_model=FluidTorque)
+def fluids_torque(_: FluidsReq):
+    return FluidTorque(
+        capacities={"engine_oil": "3.5 L"},
+        specs={"viscosity": "5W-40", "type": "XPS Synthetic"},
+        torques=[{"fastener": "Front axle", "value_nm": 105}],
+    )
+
+# Spec sheet
+class SpecReq(BaseModel):
+    model: str
+    year: int
+    trim: Optional[str] = None
+
+@app.post("/spec_sheet", response_model=SpecSheet)
+def spec_sheet(req: SpecReq):
+    if req.model.lower().startswith("spyder"):
+        return SpecSheet(model="Spyder RT", year=req.year, trim=req.trim or "Limited",
+                         engine="Rotax 1330 ACE", transmission="6-speed semi-auto",
+                         horsepower=115, torque=96, weight_lbs=1021, seat_height_in=29.7,
+                         electronics="VSS, ABS, TCS")
+    return SpecSheet(model="Ryker", year=req.year, trim=req.trim or "Sport",
+                     engine="Rotax 900 ACE", transmission="CVT", horsepower=82,
+                     torque=58, weight_lbs=642, seat_height_in=24.7,
+                     electronics="VSS, ABS, TCS")
+
+# Tire fitment
+class TireReq(BaseModel):
+    model: str
+    year: int
+    axle: str  # front|rear
+
+@app.post("/tire_fitment", response_model=TireSpec)
+def tire_fitment(req: TireReq):
+    if req.axle == "front":
+        return TireSpec(axle="front", size="165/55 R15", pressure_psi=18, brand="Kenda XPS")
+    return TireSpec(axle="rear", size="225/50 R15", pressure_psi=28, brand="Kenda XPS")
+
+# Ride planner
+class RidePlannerReq(BaseModel):
+    start: str
+    end: str
+    distance_pref_mi: Optional[int] = None
+    ride_type: Optional[str] = None
+    include_dealers: Optional[bool] = False
+
+@app.post("/ride_planner", response_model=RidePlan)
+def ride_planner(_: RidePlannerReq):
+    return RidePlan(
+        distance_mi=186.5, duration_min=240, polyline="_p~iF~ps|U_ulLnnqC_mqNvxq`@",
+        waypoints=[
+            Waypoint(name="Start", lat=25.77, lon=-80.19, type="start"),
+            Waypoint(name="Alpha Can-Am", lat=25.79, lon=-80.13, type="dealer"),
+            Waypoint(name="End", lat=27.77, lon=-82.64, type="end"),
+        ],
+    )
+
+# Accessory bundles
+class BundleReq(BaseModel):
+    model: str
+    year: int
+    use_case: str  # touring|commuter|performance|winter|two-up
+    budget_usd: Optional[int] = None
+
+@app.post("/bundle_accessories", response_model=AccessoryBundles)
+def bundle_accessories(req: BundleReq):
+    bundle = AccessoryBundle(
+        bundle_name="Touring Comfort",
+        total_msrp_usd=1299,
+        items=[
+            AccessoryItem(sku="219400999", name="Heated Grips", category="Comfort", msrp_usd=299, fits=True),
+            AccessoryItem(sku="219401111", name="Top Case", category="Luggage", msrp_usd=999, fits=True),
+        ],
+    )
+    # Respect budget if provided
+    bundles = [bundle] if (req.budget_usd is None or bundle.total_msrp_usd <= req.budget_usd) else []
+    return AccessoryBundles(use_case=req.use_case, bundles=bundles)
