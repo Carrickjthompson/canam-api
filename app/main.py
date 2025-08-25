@@ -27,6 +27,26 @@ class ChatIn(BaseModel):
 class ChatOut(BaseModel):
     answer: str
 
+# ---------- Speech/Text normalization (fix mis-hearings) ----------
+def normalize_question(text: str) -> str:
+    # Canonicalize common mis-hearings of “Sea to Sky”
+    patterns = [
+        r"\bc2\s*sky\b",
+        r"\bcito\s*sky\b",
+        r"\bseat?\s+to\s+sky\b",
+        r"\bsea\s*two\s*sky\b",
+        r"\bc\s*t\s*sky\b",
+        r"\bsea[-\s]*2[-\s]*sky\b",
+        r"\bsee\s*to\s*sky\b",
+        r"\bsea\s*too\s*sky\b",
+        r"\bsea\s*the\s*sky\b",
+    ]
+    for pat in patterns:
+        text = re.sub(pat, "Sea to Sky", text, flags=re.IGNORECASE)
+    # Normalize correct phrase casing/spaces
+    text = re.sub(r"\bsea\s*to\s*sky\b", "Sea to Sky", text, flags=re.IGNORECASE)
+    return text
+
 @app.post("/chat", response_model=ChatOut)
 def chat(req: ChatIn):
     """Proxy to your OpenAI Assistant so the website answer matches GPT exactly."""
@@ -37,6 +57,9 @@ def chat(req: ChatIn):
         raise HTTPException(status_code=500, detail="Missing OPENAI_API_KEY.")
     if not ASSISTANT_ID:
         raise HTTPException(status_code=500, detail="Missing ASSISTANT_ID.")
+
+    # Apply normalization (e.g., fix "Sea to Sky" mis-hearings)
+    q = normalize_question(q)
 
     try:
         # 1) Create a fresh thread
@@ -57,6 +80,7 @@ def chat(req: ChatIn):
                 "Always interpret 'Canyon' as the 2025 Can-Am Canyon lineup (STD, XT, Redrock Edition). "
                 "Never confuse with geographic canyons such as Grand Canyon, Antelope Canyon, etc. "
                 "Never say the model doesn't exist. "
+                'If the phrase "Sea to Sky" appears in any form (including mis-hearings), treat it as the Spyder RT Sea to Sky trim. '
                 "Always use File Search first for official BRP/Can-Am data when available."
             ),
         )
