@@ -1,14 +1,21 @@
-# main.py — Can-Am Specialist API (API-only, no GPT)
+# main.py — Can-Am Specialist API (stable: /answer + safe /chat fallback)
 
 from typing import List, Optional, Dict, Any
-import re
+import os, re
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="Can-Am Specialist API", version="2.1.1")
+# Optional: OpenAI bridge (used only if OPENAI_API_KEY is present)
+try:
+    from openai import OpenAI  # pip install openai>=1.3
+    HAVE_OPENAI = True
+except Exception:
+    HAVE_OPENAI = False
 
-# CORS
+app = FastAPI(title="Can-Am Specialist API", version="2.2.0")
+
+# ---------- CORS ----------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,7 +23,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ========= Schemas =========
+# ---------- Schemas ----------
 class ModelRef(BaseModel):
     model: str
     year: Optional[int] = None
@@ -188,12 +195,12 @@ class AccessoryBundles(BaseModel):
     use_case: str
     bundles: List[AccessoryBundle]
 
-# ========= Health =========
+# ---------- Health ----------
 @app.get("/")
 def root():
     return {"message": "Welcome to the Can-Am Specialist API"}
 
-# ========= Feature Endpoints (stubs) =========
+# ---------- Feature Endpoints (stubs) ----------
 @app.post("/compare_models", response_model=ComparisonResponse)
 def compare_models(req: ComparisonRequest):
     return ComparisonResponse(
@@ -248,7 +255,7 @@ class DealerIdReq(BaseModel):
 
 @app.post("/dealer_details", response_model=DealerFull)
 def dealer_details(_: DealerIdReq):
-    base = nearest_dealers(NearestDealersReq(zip="33139")).pop().model_dump()
+    base = nearest_dealers(NearestDealersReq(zip="33139"))[0].model_dump()
     return DealerFull(**base, hours_url="https://example.com/hours",
                       manager="T. Rider", email="mgr@example.com", notes="Demo rides daily")
 
@@ -373,34 +380,21 @@ class SpecReq(BaseModel):
 @app.post("/spec_sheet", response_model=SpecSheet)
 def spec_sheet(req: SpecReq):
     name = req.model.lower()
-
-    # Handle Sea-to-Sky (various phrasings)
-    if ("sea to sky" in name) or ("sea-to-sky" in name) or ("seatosky" in name) or ("s2s" in name) or ("RTC 2 sky" in name):
-        return SpecSheet(
-            model="Spyder RT",
-            year=req.year,
-            trim="Sea-to-Sky",
-            engine="Rotax 1330 ACE",
-            transmission="6-speed semi-auto",
-            horsepower=115,
-            torque=96,
-            weight_lbs=1021,
-            seat_height_in=29.7,
-            electronics="VSS, ABS, TCS"
-        )
-
     if "spyder f3" in name or re.search(r"\bf3\b", name):
         return SpecSheet(model="Spyder F3 T", year=req.year, trim=req.trim or "F3-T",
                          engine="Rotax 1330 ACE", transmission="6-speed semi-auto",
                          horsepower=115, torque=96, weight_lbs=964, seat_height_in=26.6,
                          electronics="VSS, ABS, TCS")
-
     if "spyder rt" in name or re.search(r"\brt\b", name):
         return SpecSheet(model="Spyder RT", year=req.year, trim=req.trim or "Limited",
                          engine="Rotax 1330 ACE", transmission="6-speed semi-auto",
                          horsepower=115, torque=96, weight_lbs=1021, seat_height_in=29.7,
                          electronics="VSS, ABS, TCS")
-
+    if "sea to sky" in name or "sea-to-sky" in name:
+        return SpecSheet(model="Spyder RT Sea-to-Sky", year=req.year, trim="Sea-to-Sky",
+                         engine="Rotax 1330 ACE", transmission="6-speed semi-auto",
+                         horsepower=115, torque=96, weight_lbs=1021, seat_height_in=29.7,
+                         electronics="VSS, ABS, TCS")
     return SpecSheet(model="Ryker", year=req.year, trim=req.trim or "Sport",
                      engine="Rotax 900 ACE", transmission="CVT", horsepower=82,
                      torque=58, weight_lbs=642, seat_height_in=24.7,
@@ -454,7 +448,7 @@ def bundle_accessories(req: BundleReq):
     bundles = [bundle] if (req.budget_usd is None or bundle.total_msrp_usd <= req.budget_usd) else []
     return AccessoryBundles(use_case=req.use_case, bundles=bundles)
 
-# ========= Deterministic Router (/answer) =========
+# ---------- Deterministic Router (/answer) ----------
 class QIn(BaseModel):
     question: str
 
@@ -467,9 +461,8 @@ def _pick_year(text: str, default: int = 2024) -> int:
 
 def _pick_model(text: str) -> Optional[str]:
     t = text.lower()
-    if "sea to sky" in t or "sea-to-sky" in t or "seatosky" in t or "s2s" in t:
-        return "Spyder RT"  # Sea-to-Sky trim handled in spec_sheet()
     if "spyder f3" in t or re.search(r"\bf3\b", t): return "Spyder F3 T"
+    if "spyder rt sea" in t or "sea-to-sky" in t or "sea to sky" in t: return "Spyder RT Sea-to-Sky"
     if "spyder rt" in t or re.search(r"\brt\b", t): return "Spyder RT"
     if "ryker" in t: return "Ryker"
     if "canyon" in t: return "Canyon"
@@ -486,9 +479,7 @@ def answer(q: QIn):
 
     # Specs
     if any(k in lo for k in ("spec", "specs", "specifications", "spec sheet")) and model:
-        # honor explicit Sea-to-Sky phrasing
-        trim_hint = "Sea-to-Sky" if any(s in lo for s in ("sea to sky","sea-to-sky","seatosky","s2s")) else None
-        spec = spec_sheet(SpecReq(model=model, year=year, trim=trim_hint))
+        spec = spec_sheet(SpecReq(model=model, year=year))
         msg = (f"{spec.model} {spec.year} {spec.trim or ''}\n"
                f"Engine: {spec.engine}  Transmission: {spec.transmission}\n"
                f"Horsepower: {spec.horsepower} hp  Torque: {spec.torque} lb-ft\n"
@@ -569,3 +560,62 @@ def answer(q: QIn):
     if rec.reasons:
         msg += f" Reasons: {', '.join(rec.reasons)}."
     return QOut(answer=msg)
+
+# ---------- Safe /chat (falls back to /answer if no OpenAI) ----------
+CANAM_SYSTEM = (
+    "You are a certified Can-Am On-Road Product Specialist.\n"
+    "You must only recommend official BRP/Can-Am products and accessories.\n"
+    "- Tires: Always Kenda/Kenda XPS. No other brands.\n"
+    "- Oil & fluids: Always XPS lubricants/fluids.\n"
+    "- Accessories: Genuine Can-Am accessories or bundles only.\n"
+    "If asked about aftermarket/competitors, warn about safety, warranty, and fitment, then redirect to official options.\n"
+    "Use verified model/year-accurate facts; include concrete numbers when relevant. "
+    "If unknown: 'This information is not confirmed. Please consult the owner’s manual or a certified Can-Am dealer.'\n"
+    "Be brand-positive, professional, complete."
+)
+
+class ChatIn(BaseModel):
+    question: str
+
+class ChatOut(BaseModel):
+    answer: str
+
+@app.post("/chat", response_model=ChatOut)
+def chat(req: ChatIn):
+    q = (req.question or "").strip()
+    if not q:
+        return ChatOut(answer="Please ask a question.")
+    # If OpenAI is not configured, route to deterministic engine to avoid server error
+    if not HAVE_OPENAI or not os.environ.get("OPENAI_API_KEY"):
+        # mirror /answer so the site never breaks
+        return answer(QIn(question=q))
+
+    # With OpenAI available, answer via completions (stable)
+    try:
+        client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        resp = client.chat.completions.create(
+            model=model,
+            temperature=0.1,
+            messages=[
+                {"role": "system", "content": CANAM_SYSTEM},
+                {"role": "user", "content": q},
+            ],
+        )
+        txt = resp.choices[0].message.content.strip()
+
+        # Light brand guardrail (no aftermarket lists)
+        lower = txt.lower()
+        banned = ["michelin","pirelli","continental","dunlop","bridgestone","metzeler","avon","shinko",
+                  "givi","rizoma","yoshimura","vance","oxford","k&n","two brothers","puig"]
+        if "tire" in lower and ("kenda" not in lower and "xps" not in lower):
+            txt += "\n\nRecommended tires for Can-Am: Kenda XPS."
+        if any(b in lower for b in banned):
+            txt += ("\n\nNote: For best safety, fitment, and warranty coverage, "
+                    "choose official Can-Am/BRP parts and Kenda XPS tires.")
+
+        return ChatOut(answer=txt)
+    except Exception as e:
+        # Never 500 the site; fall back to deterministic
+        safe = answer(QIn(question=q)).answer
+        return ChatOut(answer=safe)
