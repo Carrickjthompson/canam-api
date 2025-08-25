@@ -1,15 +1,14 @@
-# main.py — Can-Am Specialist API (Assistant-backed /chat + all existing endpoints)
+# main.py — Can-Am Specialist API (API-only, no GPT)
 
 from typing import List, Optional, Dict, Any
-import os, re, time
+import re
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from openai import OpenAI
 
-app = FastAPI(title="Can-Am Specialist API", version="2.2.0")
+app = FastAPI(title="Can-Am Specialist API", version="2.1.1")
 
-# ---------- CORS ----------
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,67 +16,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------- OpenAI Assistant bridge ----------
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-ASSISTANT_ID = os.environ.get("ASSISTANT_ID")  # e.g., asst_xxxx (set in Railway)
-
-class ChatIn(BaseModel):
-    question: str
-
-class ChatOut(BaseModel):
-    answer: str
-
-@app.post("/chat", response_model=ChatOut)
-def chat(req: ChatIn):
-    """Proxy to your OpenAI Assistant so the website answer matches GPT exactly."""
-    q = (req.question or "").strip()
-    if not q:
-        raise HTTPException(status_code=400, detail="Empty question.")
-    if not client.api_key:
-        raise HTTPException(status_code=500, detail="Missing OPENAI_API_KEY.")
-    if not ASSISTANT_ID:
-        raise HTTPException(status_code=500, detail="Missing ASSISTANT_ID.")
-
-    try:
-        # 1) Create a fresh thread
-        thread = client.beta.threads.create()
-
-        # 2) Add the user's message
-        client.beta.threads.messages.create(
-            thread_id=thread.id,
-            role="user",
-            content=q,
-        )
-
-        # 3) Run the assistant
-        run = client.beta.threads.runs.create(
-            thread_id=thread.id,
-            assistant_id=ASSISTANT_ID,
-        )
-
-        # 4) Poll until complete (quick, safe loop)
-        for _ in range(60):  # ~30s max
-            run = client.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
-            if run.status in ("completed", "failed", "cancelled", "expired"):
-                break
-            time.sleep(0.5)
-
-        if run.status != "completed":
-            raise HTTPException(status_code=500, detail=f"Assistant run status: {run.status}")
-
-        # 5) Read the latest assistant message
-        messages = client.beta.threads.messages.list(thread_id=thread.id, order="desc", limit=1)
-        answer = ""
-        if messages.data:
-            for part in messages.data[0].content:
-                if part.type == "text":
-                    answer += part.text.value
-
-        return ChatOut(answer=answer.strip() or "No answer.")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Assistant error: {e}")
-
-# ---------- Shared Schemas ----------
+# ========= Schemas =========
 class ModelRef(BaseModel):
     model: str
     year: Optional[int] = None
@@ -249,12 +188,12 @@ class AccessoryBundles(BaseModel):
     use_case: str
     bundles: List[AccessoryBundle]
 
-# ---------- Health ----------
+# ========= Health =========
 @app.get("/")
 def root():
     return {"message": "Welcome to the Can-Am Specialist API"}
 
-# ---------- Feature Endpoints (unchanged stubs) ----------
+# ========= Feature Endpoints (stubs) =========
 @app.post("/compare_models", response_model=ComparisonResponse)
 def compare_models(req: ComparisonRequest):
     return ComparisonResponse(
@@ -309,7 +248,7 @@ class DealerIdReq(BaseModel):
 
 @app.post("/dealer_details", response_model=DealerFull)
 def dealer_details(_: DealerIdReq):
-    base = nearest_dealers(NearestDealersReq(zip="33139"))[0].model_dump()
+    base = nearest_dealers(NearestDealersReq(zip="33139")).pop().model_dump()
     return DealerFull(**base, hours_url="https://example.com/hours",
                       manager="T. Rider", email="mgr@example.com", notes="Demo rides daily")
 
@@ -434,16 +373,34 @@ class SpecReq(BaseModel):
 @app.post("/spec_sheet", response_model=SpecSheet)
 def spec_sheet(req: SpecReq):
     name = req.model.lower()
+
+    # Handle Sea-to-Sky (various phrasings)
+    if ("sea to sky" in name) or ("sea-to-sky" in name) or ("seatosky" in name) or ("s2s" in name) or ("RTC 2 sky" in name):
+        return SpecSheet(
+            model="Spyder RT",
+            year=req.year,
+            trim="Sea-to-Sky",
+            engine="Rotax 1330 ACE",
+            transmission="6-speed semi-auto",
+            horsepower=115,
+            torque=96,
+            weight_lbs=1021,
+            seat_height_in=29.7,
+            electronics="VSS, ABS, TCS"
+        )
+
     if "spyder f3" in name or re.search(r"\bf3\b", name):
         return SpecSheet(model="Spyder F3 T", year=req.year, trim=req.trim or "F3-T",
                          engine="Rotax 1330 ACE", transmission="6-speed semi-auto",
                          horsepower=115, torque=96, weight_lbs=964, seat_height_in=26.6,
                          electronics="VSS, ABS, TCS")
+
     if "spyder rt" in name or re.search(r"\brt\b", name):
         return SpecSheet(model="Spyder RT", year=req.year, trim=req.trim or "Limited",
                          engine="Rotax 1330 ACE", transmission="6-speed semi-auto",
                          horsepower=115, torque=96, weight_lbs=1021, seat_height_in=29.7,
                          electronics="VSS, ABS, TCS")
+
     return SpecSheet(model="Ryker", year=req.year, trim=req.trim or "Sport",
                      engine="Rotax 900 ACE", transmission="CVT", horsepower=82,
                      torque=58, weight_lbs=642, seat_height_in=24.7,
@@ -496,3 +453,119 @@ def bundle_accessories(req: BundleReq):
     )
     bundles = [bundle] if (req.budget_usd is None or bundle.total_msrp_usd <= req.budget_usd) else []
     return AccessoryBundles(use_case=req.use_case, bundles=bundles)
+
+# ========= Deterministic Router (/answer) =========
+class QIn(BaseModel):
+    question: str
+
+class QOut(BaseModel):
+    answer: str
+
+def _pick_year(text: str, default: int = 2024) -> int:
+    m = re.search(r"\b(20\d{2})\b", text)
+    return int(m.group(1)) if m else default
+
+def _pick_model(text: str) -> Optional[str]:
+    t = text.lower()
+    if "sea to sky" in t or "sea-to-sky" in t or "seatosky" in t or "s2s" in t:
+        return "Spyder RT"  # Sea-to-Sky trim handled in spec_sheet()
+    if "spyder f3" in t or re.search(r"\bf3\b", t): return "Spyder F3 T"
+    if "spyder rt" in t or re.search(r"\brt\b", t): return "Spyder RT"
+    if "ryker" in t: return "Ryker"
+    if "canyon" in t: return "Canyon"
+    return None
+
+@app.post("/answer", response_model=QOut)
+def answer(q: QIn):
+    text = q.question.strip()
+    if not text:
+        raise HTTPException(400, "Empty question")
+    lo = text.lower()
+    model = _pick_model(lo)
+    year = _pick_year(lo)
+
+    # Specs
+    if any(k in lo for k in ("spec", "specs", "specifications", "spec sheet")) and model:
+        # honor explicit Sea-to-Sky phrasing
+        trim_hint = "Sea-to-Sky" if any(s in lo for s in ("sea to sky","sea-to-sky","seatosky","s2s")) else None
+        spec = spec_sheet(SpecReq(model=model, year=year, trim=trim_hint))
+        msg = (f"{spec.model} {spec.year} {spec.trim or ''}\n"
+               f"Engine: {spec.engine}  Transmission: {spec.transmission}\n"
+               f"Horsepower: {spec.horsepower} hp  Torque: {spec.torque} lb-ft\n"
+               f"Weight: {spec.weight_lbs} lb  Seat height: {spec.seat_height_in} in\n"
+               f"Electronics: {spec.electronics or '—'}")
+        return QOut(answer=msg)
+
+    # Oil / Fluids / Torque
+    if any(k in lo for k in ("oil", "fluid", "fluids", "torque", "capacity")) and model:
+        sys = "engine"
+        if "brake" in lo: sys = "brake"
+        elif "trans" in lo or "transmission" in lo: sys = "trans"
+        ft = fluids_torque(FluidsReq(model=model, year=year, system=sys))
+        caps = ", ".join(f"{k.replace('_',' ')}: {v}" for k, v in ft.capacities.items()) or "—"
+        torq = "; ".join(f"{t['fastener']}: {t['value_nm']} Nm" for t in ft.torques) or "—"
+        spec = f"Viscosity: {ft.specs.get('viscosity','—')}  Type: {ft.specs.get('type','—')}"
+        return QOut(answer=f"{model} {year} {sys} fluids\n{caps}\n{spec}\nKey torques: {torq}")
+
+    # Tires
+    if "tire" in lo and model:
+        axle = "rear" if "rear" in lo else "front"
+        ts = tire_fitment(TireReq(model=model, year=year, axle=axle))
+        return QOut(answer=f"{model} {year} {axle} tire: {ts.size}, {ts.pressure_psi} psi. Recommended brand: {ts.brand}.")
+
+    # Maintenance
+    if any(k in lo for k in ("service", "maint", "maintenance", "interval")) and model:
+        miles = None
+        m = re.search(r"(\d{3,6})\s*(mi|miles)", lo)
+        if m: miles = int(m.group(1))
+        sched = get_maintenance_schedule(MaintenanceReq(model=model, year=year, miles=miles))
+        items = sched.get("next_due", [])
+        lines = [f"- {i.get('task','—')} — {i.get('interval_mi','—')} mi / {i.get('interval_time','—')}" for i in items]
+        return QOut(answer=f"{model} {year} maintenance:\n" + ("\n".join(lines) if lines else "No items."))
+
+    # Dealers
+    if "dealer" in lo or "dealership" in lo:
+        zm = re.search(r"\b\d{5}\b", lo)
+        if not zm:
+            return QOut(answer="Say a 5-digit ZIP, e.g., “dealer near 90210”.")
+        lst = nearest_dealers(NearestDealersReq(zip=zm.group(0), radius_mi=50, limit=5))
+        if not lst: return QOut(answer="No nearby dealers found.")
+        txt = "Closest dealers:\n" + "\n".join(f"• {d.name} — {d.city}, {d.state}" for d in lst[:5])
+        return QOut(answer=txt)
+
+    # Parts
+    if any(k in lo for k in ("part", "parts", "diagram")) and model:
+        asm = "front_brake" if "brake" in lo else ("rear_drive" if "drive" in lo else "handlebar")
+        items = parts_lookup(PartsReq(model=model, year=year, assembly=asm))
+        if not items: return QOut(answer="No parts found.")
+        first = items[0]
+        return QOut(answer=f"{model} {year} parts ({asm}): {first.name} — #{first.part_no}")
+
+    # Accessories / Bundles
+    if "accessor" in lo or "bundle" in lo:
+        use = ("touring" if "tour" in lo else
+               "commuter" if "commute" in lo else
+               "performance" if "performance" in lo else
+               "two-up" if "two" in lo else
+               "winter" if "winter" in lo else
+               "touring")
+        b = bundle_accessories(BundleReq(model=model or "Ryker", year=year, use_case=use))
+        if not b.bundles:
+            return QOut(answer="No bundle within budget. Ask for another use-case.")
+        bb = b.bundles[0]
+        items = ", ".join(i.name for i in bb.items)
+        return QOut(answer=f"{bb.bundle_name} (${bb.total_msrp_usd}): {items}")
+
+    # Default → recommendation
+    rp = RecommendationInput.RiderProfile(
+        experience_level=("new" if "new" in lo else "expert" if "expert" in lo else "intermediate"),
+        ride_type=("long-distance" if any(k in lo for k in ("tour", "two-up", "highway", "distance"))
+                   else "urban" if any(k in lo for k in ("city", "commute"))
+                   else "solo"),
+        comfort_priority=any(k in lo for k in ("tour", "two-up", "comfort"))
+    )
+    rec = recommend_model(RecommendationInput(rider_profile=rp))
+    msg = f"I recommend the {rec.model} {rec.trim or ''} {rec.year or ''}.".strip()
+    if rec.reasons:
+        msg += f" Reasons: {', '.join(rec.reasons)}."
+    return QOut(answer=msg)
