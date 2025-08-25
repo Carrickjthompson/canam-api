@@ -17,6 +17,101 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ---------- Dealer lookup via Google Places (city/ZIP) ----------
+import requests
+
+GOOGLE_PLACES_API_KEY = os.environ.get("GOOGLE_PLACES_API_KEY")
+
+class DealerInfoIn(BaseModel):
+    location: Optional[str] = None   # e.g., "Mobile, Alabama"
+    zip: Optional[str] = None        # e.g., "36602"
+    radius_mi: Optional[int] = 50
+    limit: Optional[int] = 5
+
+class DealerInfoOut(BaseModel):
+    dealers: List[Dealer]
+
+def _mi_to_meters(mi: int) -> int:
+    return int(mi * 1609.344)
+
+def _places_text_search(query: str, radius_m: int, limit: int) -> List[dict]:
+    url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+    params = {
+        "key": GOOGLE_PLACES_API_KEY,
+        "query": query,
+        "radius": radius_m,
+        "type": "car_dealer",
+    }
+    r = requests.get(url, params=params, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    results = data.get("results", [])[:limit]
+    return results
+
+def _place_details(place_id: str) -> dict:
+    url = "https://maps.googleapis.com/maps/api/place/details/json"
+    params = {
+        "key": GOOGLE_PLACES_API_KEY,
+        "place_id": place_id,
+        "fields": "formatted_phone_number,website,opening_hours,geometry"
+    }
+    r = requests.get(url, params=params, timeout=10)
+    r.raise_for_status()
+    return r.json().get("result", {}) or {}
+
+@app.post("/dealer_info", response_model=DealerInfoOut)
+def dealer_info(req: DealerInfoIn):
+    """
+    Returns nearby *Can-Am On-Road* dealers by city/ZIP using Google Places.
+    We bias results with a brand query to avoid generic powersports shops.
+    """
+    if not GOOGLE_PLACES_API_KEY:
+        raise HTTPException(500, "Missing GOOGLE_PLACES_API_KEY.")
+
+    if not (req.location or req.zip):
+        raise HTTPException(400, "Provide 'location' or 'zip'.")
+
+    query_core = req.zip if req.zip else req.location
+    # Brand-biased query to skew toward true Can-Am dealers
+    # (Google doesn’t provide a strict brand filter in Places; this bias works well.)
+    query = f"Can-Am On-Road dealer near {query_core}"
+
+    radius_m = _mi_to_meters(req.radius_mi or 50)
+    raw = _places_text_search(query=query, radius_m=radius_m, limit=req.limit or 5)
+
+    dealers: List[Dealer] = []
+    for r in raw:
+        # Optional details: phone, website, hours
+        details = _place_details(r.get("place_id", "")) if r.get("place_id") else {}
+
+        # Very light brand filter heuristic: prioritize names/desc mentioning Can-Am / BRP
+        name = r.get("name", "")
+        desc_text = " ".join([x for x in [
+            r.get("business_status"),
+            r.get("types", []),
+            r.get("formatted_address", "")
+        ] if x])
+
+        brand_hit = ("can-am" in name.lower()) or ("canam" in name.lower()) or ("brp" in name.lower())
+
+        dealers.append(Dealer(
+            dealer_id=r.get("place_id", ""),
+            name=name,
+            address=r.get("formatted_address", None),
+            city="",  # Google doesn’t split city/state reliably in Text Search; keep full address above
+            state="",
+            zip="",
+            phone=details.get("formatted_phone_number"),
+            distance=None,  # distance not provided by Places Text Search
+            services=["sales", "service"] if brand_hit else ["powersports"],
+            website=details.get("website"),
+            lat=r.get("geometry", {}).get("location", {}).get("lat"),
+            lon=r.get("geometry", {}).get("location", {}).get("lng"),
+        ))
+
+    # Keep top 'limit' (already capped) and return
+    return DealerInfoOut(dealers=dealers)
+    
 # -------- OpenAI Assistant bridge --------
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 ASSISTANT_ID = os.environ.get("ASSISTANT_ID")  # e.g., asst_TMJxZjCscdiKzM85q3Lab9oC
