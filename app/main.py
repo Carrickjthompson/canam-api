@@ -96,13 +96,16 @@ def chat(req: ChatIn):
             thread_id=thread.id,
             assistant_id=ASSISTANT_ID,
             instructions=(
-                "Always interpret 'Canyon' as the 2025 Can-Am Canyon lineup (STD, XT, Redrock Edition). "
-                "Never confuse with geographic canyons (Grand Canyon, Antelope Canyon, etc.). "
-                "Never say the model doesn't exist. "
-                'If the phrase "Sea to Sky" appears in any form (including mis-hearings), treat it as the Spyder RT Sea to Sky trim. '
-                "Do not include source citations or file references in replies (no brackets like 【…】). "
-                "Summarize in your own words and use File Search first for official BRP/Can-Am data when available."
-            ),
+    "Always interpret 'Canyon' as the 2025 Can-Am Canyon lineup (STD, XT, Redrock Edition). "
+    "Never confuse with geographic canyons such as Grand Canyon, Antelope Canyon, etc. "
+    "Never say the model doesn't exist. "
+    'If the phrase "Sea to Sky" appears in any form (including mis-hearings), treat it as the Spyder RT Sea to Sky trim. '
+    "Always use File Search first for official BRP/Can-Am data when available. "
+    "Never provide unverified or generic motorcycle data. "
+    "If a fact is not confirmed in official BRP/Can-Am material, respond with: "
+    "'This information is not confirmed. Please consult the owner’s manual or a certified Can-Am dealer.' "
+    "For drive systems: Ryker = shaft drive, Spyder F3/RT/Sea to Sky = carbon-reinforced belt drive, no exceptions."
+),
         )
 
         # 4) Poll until complete
