@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from openai import OpenAI
 
-app = FastAPI(title="Can-Am Specialist API", version="2.3.0")
+app = FastAPI(title="Can-Am Specialist API", version="2.3.1")
 
 # ---------- CORS ----------
 app.add_middleware(
@@ -47,6 +47,25 @@ def normalize_question(text: str) -> str:
     text = re.sub(r"\bsea\s*to\s*sky\b", "Sea to Sky", text, flags=re.IGNORECASE)
     return text
 
+# ---------- Strip citations/footnotes from Assistant replies ----------
+def _strip_citations(part) -> str:
+    """Remove file-search annotations and bracketed source refs like 【…】."""
+    if getattr(part, "type", None) != "text":
+        return ""
+    text = part.text.value
+    # Remove SDK-provided annotation snippets if present
+    for ann in getattr(part.text, "annotations", []) or []:
+        try:
+            if hasattr(ann, "text") and ann.text:
+                text = text.replace(ann.text, "")
+        except Exception:
+            pass
+    # Fallback: remove any residual 【...】 blocks
+    text = re.sub(r"【[^】]*】", "", text)
+    # Collapse excess whitespace
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    return text
+
 @app.post("/chat", response_model=ChatOut)
 def chat(req: ChatIn):
     """Proxy to your OpenAI Assistant so the website answer matches GPT exactly."""
@@ -72,21 +91,22 @@ def chat(req: ChatIn):
             content=q,
         )
 
-        # 3) Run the assistant with override instructions (locks in Canyon = Can-Am)
+        # 3) Run the assistant with override instructions (locks in Canyon/Sea to Sky + no citations)
         run = client.beta.threads.runs.create(
             thread_id=thread.id,
             assistant_id=ASSISTANT_ID,
             instructions=(
                 "Always interpret 'Canyon' as the 2025 Can-Am Canyon lineup (STD, XT, Redrock Edition). "
-                "Never confuse with geographic canyons such as Grand Canyon, Antelope Canyon, etc. "
+                "Never confuse with geographic canyons (Grand Canyon, Antelope Canyon, etc.). "
                 "Never say the model doesn't exist. "
                 'If the phrase "Sea to Sky" appears in any form (including mis-hearings), treat it as the Spyder RT Sea to Sky trim. '
-                "Always use File Search first for official BRP/Can-Am data when available."
+                "Do not include source citations or file references in replies (no brackets like 【…】). "
+                "Summarize in your own words and use File Search first for official BRP/Can-Am data when available."
             ),
         )
 
         # 4) Poll until complete
-        for _ in range(60):  # ~30s max
+        for _ in range(120):  # up to ~60s
             run = client.beta.threads.runs.retrieve(thread_id=thread.id, run_id=run.id)
             if run.status in ("completed", "failed", "cancelled", "expired"):
                 break
@@ -100,10 +120,9 @@ def chat(req: ChatIn):
         answer = ""
         if messages.data:
             for part in messages.data[0].content:
-                if part.type == "text":
-                    answer += part.text.value
+                answer += _strip_citations(part)
 
-        return ChatOut(answer=answer.strip() or "No answer.")
+        return ChatOut(answer=(answer.strip() or "No answer."))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Assistant error: {e}")
 
@@ -111,3 +130,8 @@ def chat(req: ChatIn):
 @app.get("/")
 def root():
     return {"message": "Welcome to the Can-Am Specialist API"}
+
+# ---------- (Optional) — If you later re-add feature endpoints, keep them below ----------
+# NOTE: You said not to change existing code beyond the updates above, so the rest of
+# your earlier feature endpoints remain exactly as they were in your repo.
+# If those endpoints are still in your file, leave them untouched beneath this line.
