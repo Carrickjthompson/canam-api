@@ -1,15 +1,15 @@
-# main.py — Can-Am Specialist API (Assistant-backed /chat + all existing endpoints)
+# main.py — Can-Am Specialist API (Assistant-backed /chat, no drift)
 
-from typing import List, Optional, Dict, Any
+from typing import Optional
 import os, re, time
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from openai import OpenAI
 
 app = FastAPI(title="Can-Am Specialist API", version="2.3.2")
 
-# ---------- CORS ----------
+# -------- CORS --------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,9 +17,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------- OpenAI Assistant bridge ----------
+# -------- OpenAI Assistant bridge --------
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-ASSISTANT_ID = os.environ.get("ASSISTANT_ID")  # e.g., asst_xxxx (set in Railway)
+ASSISTANT_ID = os.environ.get("ASSISTANT_ID")  # e.g., asst_TMJxZjCscdiKzM85q3Lab9oC
 
 class ChatIn(BaseModel):
     question: str
@@ -27,9 +27,9 @@ class ChatIn(BaseModel):
 class ChatOut(BaseModel):
     answer: str
 
-# ---------- Speech/Text normalization (fix mis-hearings) ----------
+# -------- Speech/Text normalization (fix common mis-hearings) --------
 def normalize_question(text: str) -> str:
-    # Canonicalize common mis-hearings of “Sea to Sky”
+    # Canonicalize mis-hearings of “Sea to Sky”
     patterns = [
         r"\bc2\s*sky\b",
         r"\bcito\s*sky\b",
@@ -43,32 +43,36 @@ def normalize_question(text: str) -> str:
     ]
     for pat in patterns:
         text = re.sub(pat, "Sea to Sky", text, flags=re.IGNORECASE)
-    # Normalize correct phrase casing/spaces
     text = re.sub(r"\bsea\s*to\s*sky\b", "Sea to Sky", text, flags=re.IGNORECASE)
     return text
 
-# ---------- Strip citations/footnotes from Assistant replies ----------
-def _strip_citations(part) -> str:
-    """Remove file-search annotations and bracketed source refs like 【…】."""
+# -------- Strip citations/footnotes from Assistant replies --------
+def strip_citations_from_part(part) -> str:
     if getattr(part, "type", None) != "text":
         return ""
-    text = part.text.value
+    txt = part.text.value
     # Remove SDK-provided annotation snippets if present
-    for ann in getattr(part.text, "annotations", []) or []:
+    anns = getattr(part.text, "annotations", []) or []
+    for ann in anns:
         try:
             if hasattr(ann, "text") and ann.text:
-                text = text.replace(ann.text, "")
+                txt = txt.replace(ann.text, "")
         except Exception:
             pass
     # Fallback: remove any residual 【...】 blocks
-    text = re.sub(r"【[^】]*】", "", text)
+    txt = re.sub(r"【[^】]*】", "", txt)
     # Collapse excess whitespace
-    text = re.sub(r"\s{2,}", " ", text).strip()
-    return text
+    txt = re.sub(r"\s{2,}", " ", txt).strip()
+    return txt
 
 @app.post("/chat", response_model=ChatOut)
 def chat(req: ChatIn):
-    """Proxy to your OpenAI Assistant so the website answer matches GPT exactly."""
+    """
+    Proxy to your OpenAI Assistant so the website answer matches your GPT exactly.
+    No extra instructions here (avoid drift). Only:
+      - normalize 'Sea to Sky' mis-hearings
+      - remove bracketed source citations
+    """
     q = (req.question or "").strip()
     if not q:
         raise HTTPException(status_code=400, detail="Empty question.")
@@ -77,38 +81,24 @@ def chat(req: ChatIn):
     if not ASSISTANT_ID:
         raise HTTPException(status_code=500, detail="Missing ASSISTANT_ID.")
 
-    # Apply normalization (e.g., fix "Sea to Sky" mis-hearings)
+    # Normalize speech quirks
     q = normalize_question(q)
 
     try:
-        # 1) Create a fresh thread
+        # 1) Create a thread
         thread = client.beta.threads.create()
 
-        # 2) Add the user's message
+        # 2) Add the user message
         client.beta.threads.messages.create(
             thread_id=thread.id,
             role="user",
             content=q,
         )
 
-        # 3) Run the assistant with override instructions (locks in Canyon/Sea to Sky + no citations + truth guardrails)
+        # 3) Run the assistant (NO override instructions → exact behavior as your GPT)
         run = client.beta.threads.runs.create(
             thread_id=thread.id,
             assistant_id=ASSISTANT_ID,
-            instructions=(
-                # Existing guardrails
-                "Always interpret 'Canyon' as the 2025 Can-Am Canyon lineup (STD, XT, Redrock Edition). "
-                "Never confuse with geographic canyons (Grand Canyon, Antelope Canyon, etc.). "
-                "Never say the model doesn't exist. "
-                'If the phrase "Sea to Sky" appears in any form (including mis-hearings), treat it as the Spyder RT Sea to Sky trim. '
-                "Do not include source citations or file references in replies (no brackets like 【…】). "
-                "Summarize in your own words and use File Search first for official BRP/Can-Am data when available. "
-                # NEW truth guardrails
-                "Never provide unverified or generic motorcycle data. Rely only on official BRP/Can-Am sources. "
-                "If a fact cannot be confirmed from official BRP/Can-Am material, reply: "
-                "'This information is not confirmed. Please consult the owner’s manual or a certified Can-Am dealer.' "
-                "Drive system rules (no exceptions): Ryker = shaft final drive; Spyder F3/RT/Sea to Sky = carbon-reinforced belt drive."
-            ),
         )
 
         # 4) Poll until complete
@@ -122,22 +112,17 @@ def chat(req: ChatIn):
             raise HTTPException(status_code=500, detail=f"Assistant run status: {run.status}")
 
         # 5) Read the latest assistant message
-        messages = client.beta.threads.messages.list(thread_id=thread.id, order="desc", limit=1)
+        msgs = client.beta.threads.messages.list(thread_id=thread.id, order="desc", limit=1)
         answer = ""
-        if messages.data:
-            for part in messages.data[0].content:
-                answer += _strip_citations(part)
+        if msgs.data:
+            for part in msgs.data[0].content:
+                answer += strip_citations_from_part(part)
 
         return ChatOut(answer=(answer.strip() or "No answer."))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Assistant error: {e}")
 
-# ---------- Health ----------
+# -------- Health --------
 @app.get("/")
 def root():
     return {"message": "Welcome to the Can-Am Specialist API"}
-
-# ---------- (Optional) — If you later re-add feature endpoints, keep them below ----------
-# NOTE: You said not to change existing code beyond the updates above, so the rest of
-# your earlier feature endpoints remain exactly as they were in your repo.
-# If those endpoints are still in your file, leave them untouched beneath this line.
