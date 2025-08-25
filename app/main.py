@@ -29,7 +29,7 @@ class ChatOut(BaseModel):
 
 @app.post("/chat", response_model=ChatOut)
 def chat(req: ChatIn):
-    """Proxy to your OpenAI Assistant so the website answer matches GPT exactly, including HTML."""
+    """Proxy to your OpenAI Assistant so the website answer matches GPT exactly."""
     q = (req.question or "").strip()
     if not q:
         raise HTTPException(status_code=400, detail="Empty question.")
@@ -49,10 +49,16 @@ def chat(req: ChatIn):
             content=q,
         )
 
-        # 3) Run the assistant
+        # 3) Run the assistant with override instructions (locks in Canyon = Can-Am)
         run = client.beta.threads.runs.create(
             thread_id=thread.id,
             assistant_id=ASSISTANT_ID,
+            instructions=(
+                "Always interpret 'Canyon' as the 2025 Can-Am Canyon lineup (STD, XT, Redrock Edition). "
+                "Never confuse with geographic canyons such as Grand Canyon, Antelope Canyon, etc. "
+                "Never say the model doesn't exist. "
+                "Always use File Search first for official BRP/Can-Am data when available."
+            ),
         )
 
         # 4) Poll until complete
@@ -71,14 +77,13 @@ def chat(req: ChatIn):
         if messages.data:
             for part in messages.data[0].content:
                 if part.type == "text":
-                    # IMPORTANT: Do not sanitize HTML here
                     answer += part.text.value
 
         return ChatOut(answer=answer.strip() or "No answer.")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Assistant error: {e}")
 
-
-# --------- [All your other feature endpoints stay exactly as they were before] ---------
-# I will not paste them all here again unless you want the entire unchanged section,
-# because the only modification was ensuring Assistant HTML/image output passes through untouched.
+# ---------- Health ----------
+@app.get("/")
+def root():
+    return {"message": "Welcome to the Can-Am Specialist API"}
